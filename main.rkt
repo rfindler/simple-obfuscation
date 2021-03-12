@@ -1,22 +1,36 @@
-#lang racket
-(require (for-syntax racket/base file/gunzip net/base64))
-(provide (except-out (all-from-out racket) #%module-begin)
-         (rename-out [module-begin #%module-begin]))
-
-(define-syntax (module-begin stx)
-  (syntax-case stx ()
-    [(_ x ...)
-     (andmap (lambda (x) (or (identifier? x) (integer? (syntax-e x))))
-             (syntax->list #'(x ...)))
-     (let* ([data  (format "~a" (syntax->datum #'(x ...)))]
-            [data  (substring data 1 (sub1 (string-length data)))]
-            [data  (string->bytes/utf-8 data)]
-            [in    (open-input-bytes (base64-decode data))]
-            [out   (open-output-string)]
-            [out   (begin (inflate in out) (get-output-string out))]
-            [exprs (read (open-input-string (string-append "(" out ")")))]
-            [exprs (datum->syntax stx exprs stx)])
-       #`(#%module-begin #,@exprs))]))
+#lang racket/base
 
 (module reader syntax/module-reader
-  simple-obfuscation)
+  racket
+  #:read _read
+  #:read-syntax _read-syntax
+  #:whole-body-readers? #t
+  (require file/gunzip net/base64)
+
+  (define (_read port)
+    (define np (convert-port port))
+    (let loop ()
+      (define n (read np))
+      (if (eof-object? n) '() (cons n (loop)))))
+
+  (define (_read-syntax src port)
+    (define np (convert-port port))
+    (let loop ()
+      (define n (read-syntax src np))
+      (if (eof-object? n) '() (cons n (loop)))))
+
+  (define (convert-port port)
+    (read-char port) ;; get the newline following the #lang spec
+    (define-values (dl-in dl-out) (make-pipe))
+    (define-values (64-in 64-out) (make-pipe))
+    (define-values (gz-in gz-out) (make-pipe))
+    (thread (λ ()
+              (let loop ()
+                (define n (read-line port))
+                (cond
+                  [(eof-object? n) (close-output-port dl-out)]
+                  [else (display n dl-out) (loop)]))))
+    (thread (λ () (base64-decode-stream dl-in 64-out) (close-output-port 64-out)))
+    (thread (λ () (inflate 64-in gz-out) (close-output-port gz-out)))
+    (port-count-lines! gz-in)
+    gz-in))
